@@ -2,13 +2,15 @@ import math
 import os
 from typing import Tuple, List, Dict
 from datetime import datetime, timedelta
-from validity_utils import remove_spaces, validate_csv_file
 import piexif
 from tqdm import tqdm
 import pandas as pd
 from piexif import ExifIFD
 import piexif._exceptions
 import utm
+
+
+from validity_utils import remove_spaces, validate_csv_file, delete_empty_rows
 
 
 def interpolate_coords(coord1: Tuple[float, float], coord2: Tuple[float, float], fraction: float):
@@ -109,13 +111,15 @@ def set_image_exif(input_filepath: str, output_filepath: str, lon: float, lat: f
     piexif.insert(exif_bytes, input_filepath, output_filepath)
 
 
-def validate_csv(legs_csv_filepath: str) -> None:
-    validation_issues = validate_csv_file(legs_csv_filepath)  # scans for possible issues
+def lidar_preprocess(lidar_filepath: str) -> str:
+    lidar_processed_filepath: str = remove_spaces(lidar_filepath)  # assures no spaces
+    delete_empty_rows(lidar_processed_filepath)
+    validation_issues = validate_csv_file(lidar_processed_filepath)  # scans for possible issues
 
     # notifying about issues, asking to continue.
     if not validation_issues:
         print("CSV is valid.")
-        return
+        return lidar_filepath
     else:
         print("Validation Issues:")
         for issue in validation_issues:
@@ -133,6 +137,7 @@ def validate_csv(legs_csv_filepath: str) -> None:
             else:
                 print("Invalid input. Please enter 'y' or 'n'.")
 
+    return lidar_processed_filepath
 
 def extract_offset(df: pd.DataFrame, valid_files: List[Dict]) -> timedelta:
     min_df_time: datetime = df.index.min()
@@ -178,12 +183,11 @@ def create_txt_file(parsed_data: List[Dict], output_filepath: str) -> None:
         f.write('\n'.join(txt_file_lines))
 
 
-def parse_files(images_dirpath: str, legs_csv_filepath: str, set_images_exif: bool) -> None:
-    base_csv_filename = os.path.splitext(os.path.basename(legs_csv_filepath))[0]
+def parse_files(images_dirpath: str, lidar_filepath: str, set_images_exif: bool) -> None:
+    base_csv_filename = os.path.splitext(os.path.basename(lidar_filepath))[0]
     csv_output_path: str = f'{base_csv_filename}_WGS84_full_output.csv'
     txt_output_path: str = f'{base_csv_filename}_triggers.txt'
-    legs_csv_filepath = remove_spaces(legs_csv_filepath)  # assures no spaces
-    validate_csv(legs_csv_filepath)
+    lidar_processed_filepath: str = lidar_preprocess(lidar_filepath)
 
     valid_files: List[Dict] = []
     for filename in os.listdir(images_dirpath):
@@ -197,7 +201,7 @@ def parse_files(images_dirpath: str, legs_csv_filepath: str, set_images_exif: bo
 
     valid_files: List[Dict] = sorted(valid_files, key=lambda x: x['date'])
 
-    df: pd.DataFrame = pd.read_csv(legs_csv_filepath, index_col="time", parse_dates=True, date_format="%H:%M:%S")
+    df: pd.DataFrame = pd.read_csv(lidar_processed_filepath, index_col="time", parse_dates=True, infer_datetime_format=True)
     df: pd.DataFrame = df.fillna(method='ffill')
     df[["lon", "lat"]] = df["location"].str.split("/", expand=True).astype(float)
     offset: timedelta = extract_offset(df, valid_files)
@@ -244,6 +248,6 @@ def parse_files(images_dirpath: str, legs_csv_filepath: str, set_images_exif: bo
 if __name__ == "__main__":
     parse_files(
         images_dirpath=r"./images",
-        legs_csv_filepath=r"legs.csv",
+        lidar_filepath=r"legs_error.csv",
         set_images_exif=False
     )
