@@ -10,7 +10,7 @@ from piexif import ExifIFD
 import utm
 
 
-def interpolate_geo(coord1: Tuple[float, float], coord2: Tuple[float, float], fraction: float):
+def interpolate_coords(coord1: Tuple[float, float], coord2: Tuple[float, float], fraction: float):
     # Extract longitudes and latitudes
     lon1, lat1 = coord1
     lon2, lat2 = coord2
@@ -19,14 +19,8 @@ def interpolate_geo(coord1: Tuple[float, float], coord2: Tuple[float, float], fr
 
 
 def get_interpolated_location(df: pd.DataFrame, date: datetime) -> Tuple[float, float]:
-    try:
-        before = df[df.index <= date].iloc[-1]
-    except IndexError:
-        raise Exception("No data before date")
-    try:
-        after = df[df.index >= date].iloc[0]
-    except IndexError:
-        raise Exception("No data after date")
+    before = df[df.index <= date].iloc[-1]
+    after = df[df.index >= date].iloc[0]
 
     if before.name == after.name:
         return before['lon'], before['lat']
@@ -37,7 +31,7 @@ def get_interpolated_location(df: pd.DataFrame, date: datetime) -> Tuple[float, 
     coord2 = (after['lon'], after['lat'])
 
     # Get the interpolated coordinates
-    lon, lat = interpolate_geo(coord1, coord2, fraction)
+    lon, lat = interpolate_coords(coord1, coord2, fraction)
     return lon, lat
 
 
@@ -94,12 +88,8 @@ def extract_exif_date(input_filepath: str) -> datetime:
     return datetime.strptime(date_str, '%H:%M:%S')
 
 
-def set_image_exif(df: pd.DataFrame, input_filepath: str, output_filepath: str) -> None:
+def set_image_exif(input_filepath: str, output_filepath: str, lon: float, lat: float) -> None:
     exif_dict = piexif.load(input_filepath)
-    # Convert degrees to (degree, minute, second)
-
-    date: datetime = extract_exif_date(input_filepath)
-    lon, lat = get_interpolated_location(df, date)
 
     # Format latitude and longitude
     lat_deg = utm_to_deg(lat, ["S", "N"])
@@ -119,14 +109,7 @@ def set_image_exif(df: pd.DataFrame, input_filepath: str, output_filepath: str) 
     piexif.insert(exif_bytes, input_filepath, output_filepath)
 
 
-def extract_offset(df: pd.DataFrame, dirpath: str) -> timedelta:
-    min_df_time = df.index.min()
-    min_image_time = min([extract_exif_date(f'{dirpath}/{filename}') for filename in tqdm(os.listdir(dirpath))])
-    return min_df_time - min_image_time
-
-
-def parse_files(images_dirpath: str, legs_csv_filepath: str) -> None:
-    legs_csv_filepath = remove_spaces(legs_csv_filepath)  # assures no spaces
+def validate_csv(legs_csv_filepath: str) -> None:
     validation_issues = validate_csv_file(legs_csv_filepath)  # scans for possible issues
 
     # notifying about issues, asking to continue.
@@ -149,6 +132,55 @@ def parse_files(images_dirpath: str, legs_csv_filepath: str) -> None:
             else:
                 print("Invalid input. Please enter 'y' or 'n'.")
 
+
+def extract_offset(df: pd.DataFrame, dirpath: str) -> timedelta:
+    min_df_time = df.index.min()
+    min_image_time = min([extract_exif_date(f'{dirpath}/{filename}') for filename in tqdm(os.listdir(dirpath))])
+    return min_df_time - min_image_time
+
+
+def exception_start_handler(filename: str, e: Exception, parsed_data: List[Dict]):
+    print("An exception occurred")
+    print(e)
+    print(f"File failed: {filename}")
+    last_parsed_line: Dict = parsed_data[-1]
+    parsed_data.append({**last_parsed_line, 'is_valid': False})
+
+
+def add_latest_yaw(parsed_data: List[Dict]):
+    if len(parsed_data) == 1:
+        return
+
+    parsed_data[-2]['yaw'] = calculate_initial_compass_bearing(
+        (parsed_data[-2]['lon'], parsed_data[-2]['lat']),
+        (parsed_data[-1]['lon'], parsed_data[-1]['lat'])
+    )
+
+
+def create_output_csv(parsed_data: List[Dict], output_filepath: str) -> None:
+    filtered_parsed_data: List[Dict] = list(filter(lambda x: x['is_valid'], parsed_data))
+    df: pd.DataFrame = pd.DataFrame.from_records(filtered_parsed_data)
+    df: pd.DataFrame = df[['loc', 'Image_index']]
+    df.to_csv(output_filepath, index=True)
+
+
+def create_txt_file(parsed_data: List[Dict], output_filepath: str) -> None:
+    txt_file_lines: List[str] = []
+    parsed_data[-1]['yaw'] = parsed_data[-2]['yaw']
+    for datapoint in parsed_data:
+        txt_file_lines.append(f"relative_alt: 400.00, roll: 0.00, pitch: 0.00, yaw: {datapoint['yaw'] - 90}, "
+                              f"lat: {datapoint['lat']}, lon: {datapoint['lon']}")
+        txt_file_lines += ['trigger'] * 3
+
+    txt_file_lines.append(txt_file_lines[-4])
+    with open(output_filepath, 'w') as f:
+        f.write('\n'.join(txt_file_lines))
+
+
+def parse_files(images_dirpath: str, legs_csv_filepath: str, set_images_exif: bool) -> None:
+    legs_csv_filepath = remove_spaces(legs_csv_filepath)  # assures no spaces
+    # validate_csv(legs_csv_filepath)
+
     df: pd.DataFrame = pd.read_csv(legs_csv_filepath, index_col="time", parse_dates=True, date_format="%H:%M:%S")
     df: pd.DataFrame = df.fillna(method='ffill')
     df[["lon", "lat"]] = df["location"].str.split("/", expand=True).astype(float)
@@ -156,62 +188,46 @@ def parse_files(images_dirpath: str, legs_csv_filepath: str) -> None:
     df.index = df.index - offset
     filenames: List[str] = sorted(os.listdir(images_dirpath), key=lambda x: extract_exif_date(f"{images_dirpath}/{x}"))
 
-    csv_data: List[Dict] = []
-    txt_file_data: List[Dict] = []
     failed_cnt: int = 0
+    parsed_data: List[Dict] = []
     for i, filename in tqdm(enumerate(filenames), total=len(filenames)):
+        filepath: str = f'{images_dirpath}/{filename}'
+        date: datetime = extract_exif_date(filepath)
+
         try:
-            filepath: str = f'{images_dirpath}/{filename}'
-            date: datetime = extract_exif_date(filepath)
             lon, lat = get_interpolated_location(df, date)
             lon_wgs84, lat_wgs84 = transform_to_wgs84(lon, lat)
             loc: str = f"WGS84 GEO {lon_wgs84} E / {lat_wgs84} N"
-            image_index = int(filename.lstrip('DSC').split('.')[0])
-            csv_data.append({'loc': loc, 'Image_index': image_index})
-        except Exception as e:
-            print("An exception occurred")
-            print(e)
+            image_index: int = int(filename.lstrip('DSC').split('.')[0])
+            parsed_data.append({'loc': loc, 'Image_index': image_index, 'lon': lon, 'lat': lat, 'is_valid': True})
+            if set_images_exif:
+                set_image_exif(filepath, filepath, lon, lat)
+        except IndexError as e:
             failed_cnt += 1
-            print(f"{failed_cnt} / {i+1} failed")
-            print(f"File failed: {filename}")
-            try:
-                before = df[df.index <= date[-1]].iloc[-1]
-                after = df[df.index > date[0]].iloc[-1]
-                print(before['lon'], before['lat'])
-                print(after['lon'], after['lat'])
-            except:
-                pass
-            txt_file_data.append(txt_file_data[-1])
-            txt_file_data[-2]['yaw'] = calculate_initial_compass_bearing(
-                (txt_file_data[-2]['lon'], txt_file_data[-2]['lat']),
-                (txt_file_data[-1]['lon'], txt_file_data[-1]['lat'])
-            )
-            continue
+            exception_start_handler(filename, e, parsed_data)
+            print(f"{failed_cnt} / {len(filenames)} failed")
+        except utm.error.OutOfRangeError as e:
+            failed_cnt += 1
+            exception_start_handler(filename, e, parsed_data)
+            before = df[df.index <= date].iloc[-1]
+            after = df[df.index >= date].iloc[-1]
+            print(before['lon'], before['lat'])
+            print(after['lon'], after['lat'])
+            print(f"{failed_cnt} / {len(filenames)} failed")
+        except Exception as e:
+            failed_cnt += 1
+            exception_start_handler(filename, e, parsed_data)
+            print(f"{failed_cnt} / {len(filenames)} failed")
+        finally:
+            add_latest_yaw(parsed_data)
 
-        txt_file_data.append({'lon': lon, 'lat': lat})
-        if len(txt_file_data) == 1:
-            continue
-
-        txt_file_data[-2]['yaw'] = calculate_initial_compass_bearing(
-            (txt_file_data[-2]['lon'], txt_file_data[-2]['lat']),
-            (txt_file_data[-1]['lon'], txt_file_data[-1]['lat'])
-        )
-
-    pd.DataFrame.from_records(csv_data).to_csv(f'full_WGS84_output.csv', index=True)
-
-    txt_file_lines: List[str] = []
-    print(txt_file_data[-1], txt_file_data[-2])
-    txt_file_data[-1]['yaw'] = txt_file_data[-2]['yaw']
-    for datapoint in txt_file_data:
-        txt_file_lines.append(f"relative_alt: 400.00, roll: 0.00, pitch: 0.00, yaw: {datapoint['yaw'] - 90}, "
-                              f"lat: {datapoint['lat']}, lon: {datapoint['lon']}")
-        txt_file_lines += ['trigger'] * 3
-
-    txt_file_lines.append(txt_file_lines[-4])
-    with open(f'triggers1.txt', 'w') as f:
-        f.write('\n'.join(txt_file_lines))
+    create_output_csv(parsed_data, f'full_WGS84_output.csv')
+    create_txt_file(parsed_data, 'triggers_output.txt')
 
 
 if __name__ == "__main__":
-    parse_files(images_dirpath=r"E:\24102023_north_1\SD1\DCIM\100MSDCF",
-                legs_csv_filepath=r"C:\Users\aribi\Desktop\test_l\לידר 2410_1n.csv")
+    parse_files(
+        images_dirpath=r"./images",
+        legs_csv_filepath=r"legs.csv",
+        set_images_exif=False
+    )
