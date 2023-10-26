@@ -115,6 +115,7 @@ def validate_csv(legs_csv_filepath: str) -> None:
     # notifying about issues, asking to continue.
     if not validation_issues:
         print("CSV is valid.")
+        return
     else:
         print("Validation Issues:")
         for issue in validation_issues:
@@ -178,8 +179,11 @@ def create_txt_file(parsed_data: List[Dict], output_filepath: str) -> None:
 
 
 def parse_files(images_dirpath: str, legs_csv_filepath: str, set_images_exif: bool) -> None:
+    base_csv_filename = os.path.splitext(os.path.basename(legs_csv_filepath))[0]
+    csv_output_path: str = f'{base_csv_filename}_WGS84_full_output.csv'
+    txt_output_path: str = f'{base_csv_filename}_triggers.txt'
     legs_csv_filepath = remove_spaces(legs_csv_filepath)  # assures no spaces
-    # validate_csv(legs_csv_filepath)
+    validate_csv(legs_csv_filepath)
 
     df: pd.DataFrame = pd.read_csv(legs_csv_filepath, index_col="time", parse_dates=True, date_format="%H:%M:%S")
     df: pd.DataFrame = df.fillna(method='ffill')
@@ -221,8 +225,8 @@ def parse_files(images_dirpath: str, legs_csv_filepath: str, set_images_exif: bo
         finally:
             add_latest_yaw(parsed_data)
 
-    create_output_csv(parsed_data, f'full_WGS84_output.csv')
-    create_txt_file(parsed_data, 'triggers_output.txt')
+    create_output_csv(parsed_data, csv_output_path)
+    create_txt_file(parsed_data, txt_output_path)
 
 
 if __name__ == "__main__":

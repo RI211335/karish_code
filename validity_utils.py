@@ -1,5 +1,7 @@
 import csv
 import os
+from datetime import datetime
+from typing import List
 
 
 def remove_spaces(input_file):
@@ -10,7 +12,7 @@ def remove_spaces(input_file):
         writer = csv.writer(outfile)
 
         for row in reader:
-            if row: # assures no empty lines
+            if row:  # assures no empty lines
                 if len(row) >= 2:
                     location = row[0].replace(" ", "")
                     time = row[1].replace(" ", "")
@@ -34,10 +36,12 @@ def is_valid_time_format(time):
 
 
 # Validation function for checking if a time is in chronological order
-def is_valid_time_range(time, times):
+def is_valid_time_range(time: str, times: List[str]):
     if not times:
-        return True  # The first time encountered is always valid
-    return time > max(times)
+        return True
+    time_obj = datetime.strptime(time, '%H:%M:%S')
+    max_time_obj = max((datetime.strptime(t, '%H:%M:%S') for t in times))
+    return time_obj > max_time_obj
 
 
 # Main validation function for the CSV file
@@ -48,20 +52,20 @@ def validate_csv_file(input_file):
 
     with open(input_file, 'r', newline='') as infile:
         reader = csv.reader(infile)
+        next(reader)  # skipping the titles
         times = []
-        for i, row in enumerate(reader, start=1):
+        for i, row in enumerate(reader, start=2):
             if len(row) >= 2:
-                location = row[0].replace(" ", "")
-                time = row[1].replace(" ", "")
+                location, time = row[0], row[1]
 
                 if not is_valid_location(location):
-                    issues.append(f"Issue: index {i}, location, format")
+                    issues.append(f"Issue at {i}: Location- Format")
 
                 if not is_valid_time_format(time):
-                    issues.append(f"Issue: index {i}, time, format")
+                    issues.append(f"Issue at {i}: Time- Format")
 
                 if not is_valid_time_range(time, times):
-                    issues.append(f"Issue: index {i}, time, range")
+                    issues.append(f"Issue at {i}: Time- Chronological Disruption")
 
                 if start_time is None:
                     start_time = time  # Assign the first valid time as the start_time
