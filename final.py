@@ -7,6 +7,7 @@ import piexif
 from tqdm import tqdm
 import pandas as pd
 from piexif import ExifIFD
+import piexif._exceptions
 import utm
 
 
@@ -66,8 +67,7 @@ def calculate_initial_compass_bearing(pointA, pointB):
     diffLong = math.radians(pointB[1] - pointA[1])
 
     x = math.sin(diffLong) * math.cos(lat2)
-    y = math.cos(lat1) * math.sin(lat2) - (math.sin(lat1)
-            * math.cos(lat2) * math.cos(diffLong))
+    y = math.cos(lat1) * math.sin(lat2) - (math.sin(lat1) * math.cos(lat2) * math.cos(diffLong))
 
     initial_bearing = math.atan2(x, y)
 
@@ -134,9 +134,9 @@ def validate_csv(legs_csv_filepath: str) -> None:
                 print("Invalid input. Please enter 'y' or 'n'.")
 
 
-def extract_offset(df: pd.DataFrame, dirpath: str) -> timedelta:
-    min_df_time = df.index.min()
-    min_image_time = min([extract_exif_date(f'{dirpath}/{filename}') for filename in tqdm(os.listdir(dirpath))])
+def extract_offset(df: pd.DataFrame, valid_files: List[Dict]) -> timedelta:
+    min_df_time: datetime = df.index.min()
+    min_image_time: datetime = min(valid_files, key=lambda x: x['date'])['date']
     return min_df_time - min_image_time
 
 
@@ -185,18 +185,30 @@ def parse_files(images_dirpath: str, legs_csv_filepath: str, set_images_exif: bo
     legs_csv_filepath = remove_spaces(legs_csv_filepath)  # assures no spaces
     validate_csv(legs_csv_filepath)
 
+    valid_files: List[Dict] = []
+    for filename in os.listdir(images_dirpath):
+        try:
+            valid_files.append({
+                'filename': filename,
+                'date': extract_exif_date(f"{images_dirpath}/{filename}")
+            })
+        except piexif._exceptions.InvalidImageDataError:
+            continue
+
+    valid_files: List[Dict] = sorted(valid_files, key=lambda x: x['date'])
+
     df: pd.DataFrame = pd.read_csv(legs_csv_filepath, index_col="time", parse_dates=True, date_format="%H:%M:%S")
     df: pd.DataFrame = df.fillna(method='ffill')
     df[["lon", "lat"]] = df["location"].str.split("/", expand=True).astype(float)
-    offset: timedelta = extract_offset(df, images_dirpath)
+    offset: timedelta = extract_offset(df, valid_files)
     df.index = df.index - offset
-    filenames: List[str] = sorted(os.listdir(images_dirpath), key=lambda x: extract_exif_date(f"{images_dirpath}/{x}"))
 
     failed_cnt: int = 0
     parsed_data: List[Dict] = []
-    for i, filename in tqdm(enumerate(filenames), total=len(filenames)):
+    for i, file in tqdm(enumerate(valid_files), total=len(valid_files)):
+        filename: str = file['filename']
+        date: datetime = file['date']
         filepath: str = f'{images_dirpath}/{filename}'
-        date: datetime = extract_exif_date(filepath)
 
         try:
             lon, lat = get_interpolated_location(df, date)
@@ -209,7 +221,7 @@ def parse_files(images_dirpath: str, legs_csv_filepath: str, set_images_exif: bo
         except IndexError as e:
             failed_cnt += 1
             exception_start_handler(filename, e, parsed_data)
-            print(f"{failed_cnt} / {len(filenames)} failed")
+            print(f"{failed_cnt} / {len(valid_files)} failed")
         except utm.error.OutOfRangeError as e:
             failed_cnt += 1
             exception_start_handler(filename, e, parsed_data)
@@ -217,11 +229,11 @@ def parse_files(images_dirpath: str, legs_csv_filepath: str, set_images_exif: bo
             after = df[df.index >= date].iloc[-1]
             print(before['lon'], before['lat'])
             print(after['lon'], after['lat'])
-            print(f"{failed_cnt} / {len(filenames)} failed")
+            print(f"{failed_cnt} / {len(valid_files)} failed")
         except Exception as e:
             failed_cnt += 1
             exception_start_handler(filename, e, parsed_data)
-            print(f"{failed_cnt} / {len(filenames)} failed")
+            print(f"{failed_cnt} / {len(valid_files)} failed")
         finally:
             add_latest_yaw(parsed_data)
 
