@@ -13,14 +13,6 @@ import utm
 from validity_utils import remove_spaces, validate_csv_file, delete_empty_rows
 
 
-def interpolate_coords(coord1: Tuple[float, float], coord2: Tuple[float, float], fraction: float):
-    # Extract longitudes and latitudes
-    lon1, lat1 = coord1
-    lon2, lat2 = coord2
-
-    return (1 - fraction) * lon1 + fraction * lon2, (1 - fraction) * lat1 + fraction * lat2
-
-
 def get_interpolated_location(df: pd.DataFrame, date: datetime) -> Tuple[float, float]:
     before = df[df.index <= date].iloc[-1]
     after = df[df.index >= date].iloc[0]
@@ -28,13 +20,10 @@ def get_interpolated_location(df: pd.DataFrame, date: datetime) -> Tuple[float, 
     if before.name == after.name:
         return before['lon'], before['lat']
 
-    # Calculate the interpolation fraction
     fraction = (date - before.name) / (after.name - before.name)
-    coord1 = (before['lon'], before['lat'])
-    coord2 = (after['lon'], after['lat'])
+    lon = (1 - fraction) * before['lon'] + fraction * after['lon']
+    lat = (1 - fraction) * before['lat'] + fraction * after['lat']
 
-    # Get the interpolated coordinates
-    lon, lat = interpolate_coords(coord1, coord2, fraction)
     return lon, lat
 
 
@@ -120,24 +109,25 @@ def lidar_preprocess(lidar_filepath: str) -> str:
     if not validation_issues:
         print("CSV is valid.")
         return lidar_filepath
-    else:
-        print("Validation Issues:")
-        for issue in validation_issues:
-            print(issue)
 
-        while True:
-            user_input = input("Continue processing (y/n)? ").strip().lower()
-            user_input = user_input[0]  # Get the first character entered
-            if user_input == "y":
-                print("Continuing...")
-                break  # Valid input, exit the loop
-            elif user_input == "n":
-                print("Exiting...")
-                exit(1)  # Exit the program
-            else:
-                print("Invalid input. Please enter 'y' or 'n'.")
+    print("Validation Issues:")
+    for issue in validation_issues:
+        print(issue)
+
+    while True:
+        user_input = input("Continue processing (y/n)? ").strip().lower()
+        user_input = user_input[0]  # Get the first character entered
+        if user_input == "y":
+            print("Continuing...")
+            break  # Valid input, exit the loop
+        elif user_input == "n":
+            print("Exiting...")
+            exit(1)  # Exit the program
+        else:
+            print("Invalid input. Please enter 'y' or 'n'.")
 
     return lidar_processed_filepath
+
 
 def extract_offset(df: pd.DataFrame, valid_files: List[Dict]) -> timedelta:
     min_df_time: datetime = df.index.min()
@@ -167,12 +157,11 @@ def create_output_csv(parsed_data: List[Dict], output_filepath: str) -> None:
     filtered_parsed_data: List[Dict] = list(filter(lambda x: x['is_valid'], parsed_data))
     df: pd.DataFrame = pd.DataFrame.from_records(filtered_parsed_data)
     df: pd.DataFrame = df[['loc', 'Image_index']]
-    df.to_csv(output_filepath, index=True)
+    df.to_csv(output_filepath, index=False)
 
 
 def create_txt_file(parsed_data: List[Dict], output_filepath: str) -> None:
     txt_file_lines: List[str] = []
-    parsed_data[-1]['yaw'] = parsed_data[-2]['yaw']
     for datapoint in parsed_data:
         txt_file_lines.append(f"relative_alt: 400.00, roll: 0.00, pitch: 0.00, yaw: {datapoint['yaw'] - 90}, "
                               f"lat: {datapoint['lat']}, lon: {datapoint['lon']}")
@@ -183,9 +172,9 @@ def create_txt_file(parsed_data: List[Dict], output_filepath: str) -> None:
         f.write('\n'.join(txt_file_lines))
 
 
-def parse_files(images_dirpath: str, lidar_filepath: str, set_images_exif: bool) -> None:
+def parse_files(images_dirpath: str, lidar_filepath: str, set_images_exif: bool = False) -> None:
     base_csv_filename = os.path.splitext(os.path.basename(lidar_filepath))[0]
-    csv_output_path: str = f'{base_csv_filename}_WGS84_full_output.csv'
+    csv_output_path: str = f'{base_csv_filename}_WGS84.csv'
     txt_output_path: str = f'{base_csv_filename}_triggers.txt'
     lidar_processed_filepath: str = lidar_preprocess(lidar_filepath)
 
@@ -196,13 +185,13 @@ def parse_files(images_dirpath: str, lidar_filepath: str, set_images_exif: bool)
                 'filename': filename,
                 'date': extract_exif_date(f"{images_dirpath}/{filename}")
             })
-        except piexif._exceptions.InvalidImageDataError:
+        except Exception:
+            print(f"couldn't parse the date out of file: {filename}")
             continue
 
     valid_files: List[Dict] = sorted(valid_files, key=lambda x: x['date'])
 
     df: pd.DataFrame = pd.read_csv(lidar_processed_filepath, index_col="time", parse_dates=True, infer_datetime_format=True)
-    df: pd.DataFrame = df.fillna(method='ffill')
     df[["lon", "lat"]] = df["location"].str.split("/", expand=True).astype(float)
     offset: timedelta = extract_offset(df, valid_files)
     df.index = df.index - offset
@@ -210,6 +199,7 @@ def parse_files(images_dirpath: str, lidar_filepath: str, set_images_exif: bool)
     failed_cnt: int = 0
     parsed_data: List[Dict] = []
     for i, file in tqdm(enumerate(valid_files), total=len(valid_files)):
+        file: Dict
         filename: str = file['filename']
         date: datetime = file['date']
         filepath: str = f'{images_dirpath}/{filename}'
@@ -230,9 +220,9 @@ def parse_files(images_dirpath: str, lidar_filepath: str, set_images_exif: bool)
             failed_cnt += 1
             exception_start_handler(filename, e, parsed_data)
             before = df[df.index <= date].iloc[-1]
-            after = df[df.index >= date].iloc[-1]
-            print(before['lon'], before['lat'])
-            print(after['lon'], after['lat'])
+            after = df[df.index >= date].iloc[0]
+            print(f"Point before: {before['lon']}, {before['lat']}")
+            print(f"Point after: {after['lon']}, {after['lat']}")
             print(f"{failed_cnt} / {len(valid_files)} failed")
         except Exception as e:
             failed_cnt += 1
@@ -240,6 +230,8 @@ def parse_files(images_dirpath: str, lidar_filepath: str, set_images_exif: bool)
             print(f"{failed_cnt} / {len(valid_files)} failed")
         finally:
             add_latest_yaw(parsed_data)
+
+    parsed_data[-1]['yaw'] = parsed_data[-2]['yaw']
 
     create_output_csv(parsed_data, csv_output_path)
     create_txt_file(parsed_data, txt_output_path)
